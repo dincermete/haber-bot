@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Article;
 use App\Models\ImageTemplate;
+use App\Enums\ArticleType;
 use Illuminate\Support\Facades\Storage;
 use Intervention\Image\Drivers\Gd\FontProcessor;
 use Intervention\Image\Geometry\Point;
@@ -43,9 +44,16 @@ class ImageGeneratorService
 
         $referer = $article->effective_source_url;
 
-        $canvas = $this->buildBackgroundLayer($imageUrl, $referer, $canvasW, $canvasH, $settings);
+        $canvas = $this->buildBackgroundLayer($imageUrl, $referer, $canvasW, $canvasH, $settings, $article);
         $canvas = $this->overlayDesignFrame($canvas, $template, $canvasW, $canvasH);
-        $this->drawBoundedTitle($canvas, $article->title ?: 'Başlıksız', $settings, $canvasW, $canvasH);
+
+        if ($article->type === ArticleType::Gold) {
+            $this->drawGoldSlots($canvas, $article, $settings, $canvasW, $canvasH);
+        } elseif ($article->type === ArticleType::Weather) {
+            $this->drawWeatherSlots($canvas, $article, $settings, $canvasW, $canvasH);
+        } else {
+            $this->drawBoundedTitle($canvas, $article->title ?: 'Başlıksız', $settings, $canvasW, $canvasH);
+        }
 
         $relativePath = 'articles/generated/'.$article->id.'.png';
         Storage::disk('public')->makeDirectory('articles/generated');
@@ -54,8 +62,12 @@ class ImageGeneratorService
         return $relativePath;
     }
 
-    private function buildBackgroundLayer(?string $imageUrl, ?string $referer, int $width, int $height, array $settings): ImageInterface
+    private function buildBackgroundLayer(?string $imageUrl, ?string $referer, int $width, int $height, array $settings, Article $article): ImageInterface
     {
+        if ($article->type?->isSpecial()) {
+            $imageUrl = null;
+        }
+
         $imageUrl = $this->imageResolver->normalizeUrl(trim((string) $imageUrl), $referer);
 
         if ($imageUrl) {
@@ -233,5 +245,270 @@ class ImageGeneratorService
         }
 
         throw new \RuntimeException('Font dosyası bulunamadı. storage/app/fonts/Urbanist-Black.ttf yükleyin.');
+    }
+
+    private function drawHeaderTitle(ImageInterface $image, string $title, array $settings, int $canvasW, int $canvasH): void
+    {
+        $headerSettings = array_merge($settings, [
+            'font_size' => (int) ($settings['header_font_size'] ?? 36),
+            'text_y' => (int) ($settings['header_text_y'] ?? 120),
+            'wrap_width' => (int) ($settings['header_wrap_width'] ?? 30),
+        ]);
+
+        $this->drawBoundedTitle($image, $title, $headerSettings, $canvasW, $canvasH);
+    }
+
+    private function drawPayloadGrid(ImageInterface $image, Article $article, array $settings, int $canvasW, int $canvasH): void
+    {
+        $payload = $article->payload ?? [];
+
+        if ($payload === []) {
+            throw new \RuntimeException('Görsel üretimi için payload verisi bulunamadı.');
+        }
+
+        $padding = (int) ($settings['padding'] ?? 60);
+        $startX = (int) ($settings['grid_start_x'] ?? 80);
+        $startY = (int) ($settings['grid_start_y'] ?? 280);
+        $rowHeight = (int) ($settings['row_height'] ?? 52);
+        $labelFontSize = (int) ($settings['label_font_size'] ?? 26);
+        $valueFontSize = (int) ($settings['value_font_size'] ?? 24);
+        $columnXs = $settings['column_x'] ?? [80, 420, 680];
+        $color = $this->parseRgb((string) ($settings['title_color'] ?? '255,255,255'), [255, 255, 255]);
+        $hexColor = sprintf('#%02x%02x%02x', $color[0], $color[1], $color[2]);
+
+        $rows = match ($article->type) {
+            ArticleType::Gold => $this->goldGridRows($payload),
+            ArticleType::Weather => $this->weatherGridRows($payload),
+            default => [],
+        };
+
+        if ($rows === []) {
+            throw new \RuntimeException('Payload grid satırları oluşturulamadı.');
+        }
+
+        $bottomLimit = $canvasH - $padding;
+        $requiredHeight = $startY + (count($rows) * $rowHeight);
+
+        if ($requiredHeight > $bottomLimit) {
+            throw new \RuntimeException(
+                'Grid taşması: '.count($rows).' satır × '.$rowHeight.'px canvas sınırını aşıyor.'
+            );
+        }
+
+        $fontPath = $this->resolveFontPath();
+        $y = $startY;
+
+        foreach ($rows as $row) {
+            foreach ($row as $colIndex => $cell) {
+                $x = (int) ($columnXs[$colIndex] ?? ($startX + ($colIndex * 200)));
+                $fontSize = $colIndex === 0 ? $labelFontSize : $valueFontSize;
+
+                $image->text((string) $cell, $x, $y, function (FontFactory $font) use ($fontPath, $fontSize, $hexColor) {
+                    $font->filename($fontPath);
+                    $font->size($fontSize);
+                    $font->color($hexColor);
+                    $font->align('left', 'top');
+                });
+            }
+
+            $y += $rowHeight;
+        }
+    }
+
+    private function drawGoldSlots(ImageInterface $image, Article $article, array $settings, int $canvasW, int $canvasH): void
+    {
+        $payload = $article->payload ?? [];
+        $items = $payload['items'] ?? [];
+
+        if ($items === []) {
+            throw new \RuntimeException('Altın fiyat payload verisi bulunamadı.');
+        }
+
+        $slots = $settings['gold_slots'] ?? ImageTemplate::defaultGoldSlots($canvasW, $canvasH);
+        $fontSize = (int) ($settings['value_font_size'] ?? 22);
+        $footerTimeFontSize = (int) ($settings['footer_time_font_size'] ?? max(14, $fontSize - 4));
+        $footerDateFontSize = (int) ($settings['footer_date_font_size'] ?? max(14, $fontSize - 4));
+        $color = $this->parseRgb((string) ($settings['value_color'] ?? $settings['title_color'] ?? '160,25,35'), [160, 25, 35]);
+        $hexColor = sprintf('#%02x%02x%02x', $color[0], $color[1], $color[2]);
+        $fontPath = $this->resolveFontPath();
+
+        foreach ($items as $index => $item) {
+            if (! isset($slots[$index])) {
+                break;
+            }
+
+            $slot = $slots[$index];
+            $this->drawSlotText($image, (string) ($item['purchase'] ?? ''), $slot['purchase'] ?? [], $fontSize, $hexColor, $fontPath);
+            $this->drawSlotText($image, (string) ($item['sale'] ?? ''), $slot['sale'] ?? [], $fontSize, $hexColor, $fontPath);
+        }
+
+        if (filled($payload['source_updated_at'] ?? null) && isset($settings['footer_source_updated'])) {
+            $this->drawSlotText(
+                $image,
+                (string) $payload['source_updated_at'],
+                $settings['footer_source_updated'],
+                $footerTimeFontSize,
+                $hexColor,
+                $fontPath,
+            );
+        }
+
+        if ($article->data_fetched_at) {
+            $fetchedText = $article->data_fetched_at->timezone('Europe/Istanbul')->format('d.m.Y');
+            if (isset($settings['footer_data_fetched'])) {
+                $this->drawSlotText(
+                    $image,
+                    $fetchedText,
+                    $settings['footer_data_fetched'],
+                    $footerDateFontSize,
+                    $hexColor,
+                    $fontPath,
+                );
+            }
+        }
+    }
+
+    private function drawWeatherSlots(ImageInterface $image, Article $article, array $settings, int $canvasW, int $canvasH): void
+    {
+        $payload = $article->payload ?? [];
+        $districts = $payload['districts'] ?? [];
+
+        if ($districts === []) {
+            throw new \RuntimeException('Hava durumu payload verisi bulunamadı.');
+        }
+
+        $slots = $settings['weather_slots'] ?? ImageTemplate::defaultWeatherSlots($canvasW, $canvasH);
+        $valueFontSize = (int) ($settings['value_font_size'] ?? 20);
+        $merkezTemperatureFontSize = (int) ($settings['merkez_temperature_font_size'] ?? 42);
+        $headerDateFontSize = (int) ($settings['header_date_font_size'] ?? 24);
+        $color = $this->parseRgb((string) ($settings['value_color'] ?? $settings['title_color'] ?? '30,50,90'), [30, 50, 90]);
+        $hexColor = sprintf('#%02x%02x%02x', $color[0], $color[1], $color[2]);
+        $fontPath = $this->resolveFontPath();
+
+        foreach ($districts as $index => $district) {
+            if (! isset($slots[$index])) {
+                break;
+            }
+
+            $slot = $slots[$index];
+            $temperatureFontSize = $index === 0 ? $merkezTemperatureFontSize : $valueFontSize;
+
+            $this->drawSlotText(
+                $image,
+                ($district['temperature'] ?? '—').'°C',
+                $slot['temperature'] ?? [],
+                $temperatureFontSize,
+                $hexColor,
+                $fontPath,
+            );
+
+            $this->drawSlotText(
+                $image,
+                '%'.(string) ($district['humidity'] ?? '—'),
+                $slot['humidity'] ?? [],
+                $valueFontSize,
+                $hexColor,
+                $fontPath,
+            );
+
+            $this->drawSlotText(
+                $image,
+                ($district['wind_speed'] ?? '—').' km/s',
+                $slot['wind_speed'] ?? [],
+                $valueFontSize,
+                $hexColor,
+                $fontPath,
+            );
+        }
+
+        if ($article->data_fetched_at && isset($settings['header_date'])) {
+            $this->drawSlotText(
+                $image,
+                $article->data_fetched_at->timezone('Europe/Istanbul')->format('d.m.Y'),
+                $settings['header_date'],
+                $headerDateFontSize,
+                $hexColor,
+                $fontPath,
+            );
+        }
+    }
+
+    /**
+     * @param  array{x?: int, y?: int, align?: string}  $slot
+     */
+    private function drawSlotText(
+        ImageInterface $image,
+        string $text,
+        array $slot,
+        int $fontSize,
+        string $hexColor,
+        string $fontPath,
+    ): void {
+        $text = trim($text);
+        if ($text === '') {
+            return;
+        }
+
+        $x = (int) ($slot['x'] ?? 0);
+        $y = (int) ($slot['y'] ?? 0);
+        $align = in_array($slot['align'] ?? 'center', ['left', 'center', 'right'], true)
+            ? $slot['align']
+            : 'center';
+        $valign = in_array($slot['valign'] ?? 'center', ['top', 'center', 'bottom'], true)
+            ? $slot['valign']
+            : 'center';
+
+        $image->text($text, $x, $y, function (FontFactory $font) use ($fontPath, $fontSize, $hexColor, $align, $valign) {
+            $font->filename($fontPath);
+            $font->size($fontSize);
+            $font->color($hexColor);
+            $font->align($align, $valign);
+        });
+    }
+
+    /**
+     * @return list<list<string>>
+     */
+    private function goldGridRows(array $payload): array
+    {
+        $rows = [];
+
+        foreach ($payload['items'] ?? [] as $item) {
+            $rows[] = [
+                (string) ($item['purchase'] ?? ''),
+                (string) ($item['sale'] ?? ''),
+            ];
+        }
+
+        return $rows;
+    }
+
+    /**
+     * @return list<list<string>>
+     */
+    private function weatherGridRows(array $payload): array
+    {
+        $rows = [['İlçe', 'Sıcaklık', 'Nem', 'Rüzgar']];
+
+        foreach ($payload['districts'] ?? [] as $district) {
+            $rows[] = [
+                (string) ($district['name'] ?? ''),
+                ($district['temperature'] ?? '—').'°C',
+                '%'.(string) ($district['humidity'] ?? '—'),
+                ($district['wind_speed'] ?? '—').' km/s',
+            ];
+        }
+
+        return $rows;
+    }
+
+    private function resolveFontPath(): string
+    {
+        $fontPath = storage_path('app/fonts/Urbanist-Black.ttf');
+        if (is_file($fontPath)) {
+            return $fontPath;
+        }
+
+        return $this->fallbackFont();
     }
 }

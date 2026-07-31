@@ -3,12 +3,14 @@
 namespace App\Filament\Resources\Articles\Pages;
 
 use App\Enums\ArticleStatus;
+use App\Enums\ArticleType;
 use App\Filament\Resources\Articles\ArticleResource;
-use App\Jobs\RegenerateArticleImageJob;
+use App\Services\ArticleImageRegenerator;
 use App\Services\ActivityLogger;
 use App\Services\AiService;
 use App\Services\ArticleGalleryService;
 use App\Services\ImageCacheService;
+use App\Services\SpecialContentFactory;
 use App\Services\TemplateService;
 use Filament\Actions\Action;
 use Filament\Actions\DeleteAction;
@@ -39,8 +41,6 @@ use Livewire\Features\SupportFileUploads\TemporaryUploadedFile;
 class EditArticle extends EditRecord
 {
     protected static string $resource = ArticleResource::class;
-
-    public bool $isGeneratingImage = false;
 
     protected bool $isFirstApproval = false;
 
@@ -268,15 +268,10 @@ class EditArticle extends EditRecord
     {
         $this->persistImageGenerationFields();
 
-        $this->isGeneratingImage = true;
-
         try {
-            RegenerateArticleImageJob::dispatchSync($this->getRecord()->fresh());
-            $this->isGeneratingImage = false;
+            app(ArticleImageRegenerator::class)->regenerate($this->getRecord()->fresh());
             Notification::make()->title('Görsel üretildi')->success()->send();
         } catch (\Throwable $e) {
-            $this->isGeneratingImage = false;
-            app(ActivityLogger::class)->log('Görsel üretilemedi: '.$e->getMessage(), 'error', $this->getRecord());
             Notification::make()->title('Görsel üretilemedi')->body($e->getMessage())->danger()->send();
         }
     }
@@ -288,22 +283,6 @@ class EditArticle extends EditRecord
             'selected_image_url' => $this->data['selected_image_url'] ?? null,
             'image_template_id' => $this->data['image_template_id'] ?? null,
         ]);
-    }
-
-    public function pollGeneratedImage(): void
-    {
-        if (! $this->isGeneratingImage) {
-            return;
-        }
-
-        $path = $this->getRecord()->fresh()->generated_image_path;
-
-        if (! $path) {
-            return;
-        }
-
-        $this->isGeneratingImage = false;
-        Notification::make()->title('Görsel üretildi')->success()->send();
     }
 
     public function approveArticle(): void
@@ -405,20 +384,65 @@ class EditArticle extends EditRecord
 
     protected function getHeaderActions(): array
     {
-        return [
-            $this->getSaveFormAction(),
-            Action::make('openSource')
+        $actions = [];
+
+        if ($this->isSpecialContent()) {
+            $actions[] = Action::make('refreshData')
+                ->label('Veriyi Yenile')
+                ->icon(Heroicon::OutlinedArrowPath)
+                ->color('info')
+                ->requiresConfirmation()
+                ->modalHeading('Güncel veriyi çek')
+                ->modalDescription('Kaynak API\'den veri tekrar çekilecek; özet ve payload güncellenecek. Mevcut görsel sıfırlanır.')
+                ->action(fn () => $this->refreshSpecialContent());
+        } else {
+            $actions[] = Action::make('openSource')
                 ->label('Orijinal haberi aç')
                 ->icon(Heroicon::OutlinedArrowTopRightOnSquare)
                 ->url(fn (): string => $this->getRecord()->effective_source_url ?? '#')
                 ->openUrlInNewTab()
                 ->visible(fn (): bool => filled($this->getRecord()->effective_source_url))
-                ->color('gray'),
-            DeleteAction::make()
-                ->iconButton()
-                ->label('')
-                ->tooltip('Sil'),
-        ];
+                ->color('gray');
+        }
+
+        $actions[] = $this->getSaveFormAction();
+        $actions[] = DeleteAction::make()
+            ->iconButton()
+            ->label('')
+            ->tooltip('Sil');
+
+        return $actions;
+    }
+
+    public function refreshSpecialContent(): void
+    {
+        $record = $this->getRecord();
+        $factory = app(SpecialContentFactory::class);
+
+        try {
+            $article = match ($record->type) {
+                ArticleType::Gold => $factory->syncGold(auth()->user()),
+                ArticleType::Weather => $factory->syncWeather(auth()->user()),
+                default => null,
+            };
+
+            if ($article === null) {
+                Notification::make()->title('Veri yenilenemedi')->danger()->send();
+
+                return;
+            }
+
+            $this->record = $article;
+            $this->fillForm();
+            Notification::make()->title('Veri güncellendi')->success()->send();
+        } catch (\Throwable $e) {
+            Notification::make()->title('Veri yenilenemedi')->body($e->getMessage())->danger()->send();
+        }
+    }
+
+    protected function isSpecialContent(): bool
+    {
+        return $this->getRecord()->type?->isSpecial() ?? false;
     }
 
     protected function getFormActions(): array
@@ -510,7 +534,6 @@ class EditArticle extends EditRecord
                 ->button()
                 ->color('primary')
                 ->size(Size::Large)
-                ->disabled(fn (): bool => $this->isGeneratingImage)
                 ->action(fn () => $this->generateImage()),
             Action::make('downloadImage')
                 ->label('Anlık İndir')
@@ -528,7 +551,6 @@ class EditArticle extends EditRecord
     {
         return [
             'generatedUrl' => $this->getPreviewUrl(),
-            'isGenerating' => $this->isGeneratingImage,
             'coverUrl' => $galleryService->toDisplayUrl((string) ($this->data['selected_image_url'] ?? '')) ?: null,
         ];
     }
@@ -564,9 +586,18 @@ class EditArticle extends EditRecord
 
     protected function summaryField(): RichEditor
     {
-        return RichEditor::make('summary')
+        $field = RichEditor::make('summary')
             ->label('Özet')
-            ->columnSpanFull()
+            ->columnSpanFull();
+
+        if ($this->isSpecialContent()) {
+            return $field
+                ->disabled()
+                ->dehydrated()
+                ->toolbarButtons([]);
+        }
+
+        return $field
             ->tools([
                 RichEditorTool::make('rewriteSummaryAi')
                     ->label('AI Özgünleştir')
@@ -600,6 +631,54 @@ class EditArticle extends EditRecord
     {
         $record = $this->getRecord();
         $galleryService = app(ArticleGalleryService::class);
+        $isSpecial = $this->isSpecialContent();
+        $contentLabel = match ($record->type) {
+            ArticleType::Gold => 'Altın Fiyatları',
+            ArticleType::Weather => 'Hava Durumu',
+            default => 'Haber İçeriği',
+        };
+
+        $mainContentSchema = [
+            TextInput::make('title')
+                ->label('Başlık')
+                ->required()
+                ->maxLength(500)
+                ->live(debounce: 400)
+                ->columnSpanFull()
+                ->suffixActions($isSpecial ? [] : [
+                    Action::make('searchGoogle')
+                        ->icon(Heroicon::OutlinedMagnifyingGlass)
+                        ->label('Google')
+                        ->tooltip('Google\'da ara')
+                        ->color('gray')
+                        ->url(fn (): string => 'https://www.google.com/search?q='.urlencode((string) ($this->data['title'] ?? '')))
+                        ->openUrlInNewTab(),
+                    CopyAction::make()
+                        ->label('Kopyala')
+                        ->tooltip('Başlığı kopyala')
+                        ->copyMessage('Başlık kopyalandı'),
+                    Action::make('rewriteTitleAi')
+                        ->icon(Heroicon::OutlinedSparkles)
+                        ->label('AI')
+                        ->tooltip('Başlığı AI ile özgünleştir')
+                        ->color('info')
+                        ->requiresConfirmation()
+                        ->modalHeading('Başlığı özgünleştir')
+                        ->modalDescription('Yalnızca başlık alanı OpenAI ile yeniden yazılacak.')
+                        ->action(fn () => $this->rewriteTitleWithAi()),
+                ]),
+            $this->summaryField(),
+        ];
+
+        if ($isSpecial) {
+            $mainContentSchema[] = View::make('filament.articles.special-data-panel')
+                ->viewData(fn (): array => [
+                    'payload' => $record->fresh()->payload ?? [],
+                    'type' => $record->type?->value,
+                    'dataFetchedAt' => $record->fresh()->data_fetched_at?->timezone('Europe/Istanbul')->format('d.m.Y H:i'),
+                ])
+                ->columnSpanFull();
+        }
 
         return $schema
             ->columns(1)
@@ -615,44 +694,17 @@ class EditArticle extends EditRecord
                         Grid::make(1)
                             ->columnSpan(['default' => 1, 'lg' => 2])
                             ->schema([
-                                Section::make('Haber İçeriği')
-                                    ->description('Başlık ve özet — onay sonrası da düzenlenebilir')
+                                Section::make($contentLabel)
+                                    ->description($isSpecial
+                                        ? 'Başlık düzenlenebilir; özet ve veri tablosu kaynakla senkron kalır'
+                                        : 'Başlık ve özet — onay sonrası da düzenlenebilir')
                                     ->icon(Heroicon::OutlinedDocumentText)
-                                    ->schema([
-                                        TextInput::make('title')
-                                            ->label('Başlık')
-                                            ->required()
-                                            ->maxLength(500)
-                                            ->live(debounce: 400)
-                                            ->columnSpanFull()
-                                            ->suffixActions([
-                                                Action::make('searchGoogle')
-                                                    ->icon(Heroicon::OutlinedMagnifyingGlass)
-                                                    ->label('Google')
-                                                    ->tooltip('Google\'da ara')
-                                                    ->color('gray')
-                                                    ->url(fn (): string => 'https://www.google.com/search?q='.urlencode((string) ($this->data['title'] ?? '')))
-                                                    ->openUrlInNewTab(),
-                                                CopyAction::make()
-                                                    ->label('Kopyala')
-                                                    ->tooltip('Başlığı kopyala')
-                                                    ->copyMessage('Başlık kopyalandı'),
-                                                Action::make('rewriteTitleAi')
-                                                    ->icon(Heroicon::OutlinedSparkles)
-                                                    ->label('AI')
-                                                    ->tooltip('Başlığı AI ile özgünleştir')
-                                                    ->color('info')
-                                                    ->requiresConfirmation()
-                                                    ->modalHeading('Başlığı özgünleştir')
-                                                    ->modalDescription('Yalnızca başlık alanı OpenAI ile yeniden yazılacak.')
-                                                    ->action(fn () => $this->rewriteTitleWithAi()),
-                                            ]),
-                                        $this->summaryField(),
-                                    ]),
+                                    ->schema($mainContentSchema),
 
                                 Section::make('Kaynaklar')
                                     ->description('RSS ve yayıncı linkleri')
                                     ->icon(Heroicon::OutlinedRss)
+                                    ->visible(! $isSpecial)
                                     ->schema([
                                         Tabs::make('KaynakDetay')
                                             ->tabs([
@@ -694,14 +746,13 @@ class EditArticle extends EditRecord
                                         View::make('filament.articles.article-preview')
                                             ->key(fn (): string => 'preview-'.md5(
                                                 (string) $this->getPreviewUrl()
-                                                .'-'.(int) $this->isGeneratingImage
                                                 .'-'.($this->data['selected_image_url'] ?? '')
                                             ))
                                             ->viewData(fn (): array => $this->previewViewData($galleryService))
                                             ->columnSpanFull(),
                                         Select::make('image_template_id')
                                             ->label('Görsel şablonu')
-                                            ->options(fn () => app(TemplateService::class)->optionsForSelect())
+                                            ->options(fn () => app(TemplateService::class)->optionsForSelect($record->type))
                                             ->placeholder('Varsayılan şablon')
                                             ->native(false)
                                             ->searchable()
@@ -716,6 +767,7 @@ class EditArticle extends EditRecord
                                 Section::make('Görsel Havuzu')
                                     ->description('Görsele tıkla: kapak · X: gizle · İndir: dosya')
                                     ->icon(Heroicon::OutlinedRectangleStack)
+                                    ->visible(! $isSpecial)
                                     ->schema([
                                         FileUpload::make('uploaded_image')
                                             ->label('Bilgisayardan yükle')
@@ -739,6 +791,22 @@ class EditArticle extends EditRecord
     protected function mutateFormDataBeforeSave(array $data): array
     {
         unset($data['uploaded_image']);
+
+        if ($this->isSpecialContent()) {
+            unset($data['summary']);
+
+            return $data;
+        }
+
+        if (blank($this->getRecord()->original_title)) {
+            $data['original_title'] = $data['title'] ?? '';
+            $summaryText = trim(strip_tags((string) ($data['summary'] ?? '')));
+            $data['original_content'] = trim(($data['title'] ?? '').($summaryText !== '' ? "\n\n".$summaryText : ''));
+        }
+
+        if (blank($this->getRecord()->link) && filled($data['source_url'] ?? null)) {
+            $data['link'] = $data['source_url'];
+        }
 
         return $data;
     }

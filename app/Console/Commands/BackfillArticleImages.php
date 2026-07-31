@@ -2,7 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Jobs\RegenerateArticleImageJob;
+use App\Services\ArticleImageRegenerator;
 use App\Models\Article;
 use Illuminate\Console\Command;
 
@@ -10,7 +10,7 @@ class BackfillArticleImages extends Command
 {
     protected $signature = 'articles:backfill-images {--limit=100 : Maksimum işlenecek haber sayısı} {--force : Onay olmadan çalıştır}';
 
-    protected $description = 'Görseli olmayan haberler için görsel üretimini kuyruğa alır (opt-in)';
+    protected $description = 'Görseli olmayan haberler için görsel üretir (opt-in, senkron)';
 
     public function handle(): int
     {
@@ -37,10 +37,15 @@ class BackfillArticleImages extends Command
         }
 
         foreach ($articles as $article) {
-            RegenerateArticleImageJob::dispatch($article);
+            try {
+                app(ArticleImageRegenerator::class)->regenerate($article);
+                $this->line("Üretildi: {$article->title}");
+            } catch (\Throwable $e) {
+                $this->error("Başarısız ({$article->id}): {$e->getMessage()}");
+            }
         }
 
-        $this->info("{$articles->count()} haber için görsel üretimi kuyruğa alındı.");
+        $this->info("{$articles->count()} haber işlendi.");
 
         return self::SUCCESS;
     }

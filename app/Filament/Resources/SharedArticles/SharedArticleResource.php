@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\SharedArticles;
 
 use App\Enums\ArticleStatus;
+use App\Enums\ArticleType;
 use App\Filament\Resources\Articles\ArticleResource;
 use App\Filament\Resources\SharedArticles\Pages\ManageSharedArticles;
 use App\Models\Article;
@@ -57,6 +58,12 @@ class SharedArticleResource extends Resource
                     ->disk('public')
                     ->height(60)
                     ->square(),
+                TextColumn::make('type')
+                    ->label('Tür')
+                    ->badge()
+                    ->formatStateUsing(fn (ArticleType $state) => $state->label())
+                    ->color(fn (ArticleType $state) => $state->color())
+                    ->toggleable(),
                 TextColumn::make('title')
                     ->label('Başlık')
                     ->searchable()

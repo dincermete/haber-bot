@@ -221,7 +221,7 @@ class RssFeedService
     {
         $id = trim((string) $item->get_id());
         if ($id !== '') {
-            return $id;
+            return hash('sha256', $id);
         }
 
         $link = trim((string) $item->get_link());

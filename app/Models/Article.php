@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Enums\ArticleStatus;
+use App\Enums\ArticleType;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -11,12 +12,17 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 class Article extends Model
 {
     protected $fillable = [
+        'type',
         'feed_id',
+        'created_by_user_id',
         'article_uid',
         'original_title',
         'original_content',
         'title',
         'summary',
+        'payload',
+        'data_fetched_at',
+        'last_successful_payload',
         'link',
         'source_name',
         'source_url',
@@ -35,7 +41,11 @@ class Article extends Model
     protected function casts(): array
     {
         return [
+            'type' => ArticleType::class,
             'status' => ArticleStatus::class,
+            'payload' => 'array',
+            'last_successful_payload' => 'array',
+            'data_fetched_at' => 'datetime',
             'gallery_images' => 'array',
             'approved_at' => 'datetime',
             'edited_at' => 'datetime',
@@ -46,6 +56,11 @@ class Article extends Model
     public function feed(): BelongsTo
     {
         return $this->belongsTo(Feed::class);
+    }
+
+    public function createdBy(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by_user_id');
     }
 
     public function imageTemplate(): BelongsTo
@@ -86,6 +101,21 @@ class Article extends Model
     public function scopeFailed(Builder $query): Builder
     {
         return $query->where('status', ArticleStatus::Failed);
+    }
+
+    public function scopeOfType(Builder $query, ArticleType $type): Builder
+    {
+        return $query->where('type', $type);
+    }
+
+    public function scopeNews(Builder $query): Builder
+    {
+        return $query->where('type', ArticleType::News);
+    }
+
+    public function isSpecialContent(): bool
+    {
+        return $this->type?->isSpecial() ?? false;
     }
 
     public function getPreviewUrlAttribute(): ?string

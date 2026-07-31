@@ -6,7 +6,7 @@ use Filament\Http\Middleware\Authenticate;
 use Filament\Http\Middleware\AuthenticateSession;
 use Filament\Http\Middleware\DisableBladeIconComponents;
 use Filament\Http\Middleware\DispatchServingFilamentEvent;
-use Filament\Pages\Dashboard;
+use App\Filament\Pages\Dashboard;
 use Filament\Panel;
 use Filament\PanelProvider;
 use Filament\Support\Assets\AlpineComponent;
@@ -27,7 +27,7 @@ class AdminPanelProvider extends PanelProvider
         return $panel
             ->default()
             ->id('admin')
-            ->path('admin')
+            ->path('')
             ->login()
             ->colors([
                 'primary' => Color::Amber,
@@ -57,6 +57,8 @@ class AdminPanelProvider extends PanelProvider
                 Css::make('article-images', resource_path('css/filament/article-images.css')),
                 Js::make('interactjs', 'https://cdn.jsdelivr.net/npm/interactjs@1.10.27/dist/interact.min.js'),
                 AlpineComponent::make('template-coordinate-editor', base_path('resources/js/filament/template-coordinate-editor.js')),
+                AlpineComponent::make('gold-template-coordinate-editor', base_path('resources/js/filament/gold-template-coordinate-editor.js')),
+                AlpineComponent::make('weather-template-coordinate-editor', base_path('resources/js/filament/weather-template-coordinate-editor.js')),
             ], 'admin');
     }
 }

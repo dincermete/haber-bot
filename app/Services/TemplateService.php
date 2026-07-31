@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Article;
 use App\Models\ImageTemplate;
+use App\Enums\ArticleType;
 use App\Models\Setting;
 use Illuminate\Support\Collection;
 
@@ -42,6 +43,19 @@ class TemplateService
             }
         }
 
+        $typeSlug = match ($article->type) {
+            ArticleType::Gold => 'altin-fiyatlari',
+            ArticleType::Weather => 'hava-durumu',
+            default => null,
+        };
+
+        if ($typeSlug) {
+            $typed = ImageTemplate::query()->where('slug', $typeSlug)->first();
+            if ($typed) {
+                return $typed;
+            }
+        }
+
         return $this->getDefault();
     }
 
@@ -53,9 +67,19 @@ class TemplateService
         return array_merge($defaults, $stored);
     }
 
-    public function optionsForSelect(): array
+    public function optionsForSelect(?ArticleType $type = null): array
     {
-        return $this->getAll()
+        $query = $this->getAll();
+
+        if ($type === ArticleType::Gold) {
+            $query = $query->filter(fn (ImageTemplate $t) => $t->slug === 'altin-fiyatlari' || $t->is_default);
+        } elseif ($type === ArticleType::Weather) {
+            $query = $query->filter(fn (ImageTemplate $t) => $t->slug === 'hava-durumu' || $t->is_default);
+        } elseif ($type === ArticleType::News || $type === null) {
+            $query = $query->reject(fn (ImageTemplate $t) => in_array($t->slug, ['altin-fiyatlari', 'hava-durumu'], true));
+        }
+
+        return $query
             ->mapWithKeys(fn (ImageTemplate $t) => [$t->id => $t->name])
             ->all();
     }

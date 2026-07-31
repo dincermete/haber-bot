@@ -3,6 +3,7 @@
 namespace App\Filament\Resources\Articles;
 
 use App\Enums\ArticleStatus;
+use App\Enums\ArticleType;
 use App\Filament\Resources\Articles\Pages\CreateArticle;
 use App\Filament\Resources\Articles\Pages\EditArticle;
 use App\Filament\Resources\Articles\Pages\ManageArticles;
@@ -43,7 +44,9 @@ class ArticleResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
-            ->modifyQueryUsing(fn (Builder $query) => $query->where('status', '!=', ArticleStatus::Approved))
+            ->modifyQueryUsing(fn (Builder $query) => $query
+                ->where('type', ArticleType::News)
+                ->where('status', '!=', ArticleStatus::Approved))
             ->columns([
                 ImageColumn::make('generated_image_path')
                     ->label('Önizleme')

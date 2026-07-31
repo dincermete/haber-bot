@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Enums\ArticleStatus;
+use App\Enums\ArticleType;
 use App\Jobs\SendTelegramNewArticleJob;
 use App\Models\Article;
 use App\Models\Feed;
@@ -24,6 +25,14 @@ class CheckRssFeeds extends Command
         ArticleImageResolver $imageResolver,
         ActivityLogger $logger,
     ): int {
+        Article::query()
+            ->processing()
+            ->where('updated_at', '<', now()->subMinutes(30))
+            ->update([
+                'status' => ArticleStatus::Failed,
+                'error_message' => 'RSS işleme zaman aşımına uğradı.',
+            ]);
+
         $feeds = Feed::query()->where('is_active', true)->get();
 
         if ($feeds->isEmpty()) {
@@ -57,6 +66,7 @@ class CheckRssFeeds extends Command
                 }
 
                 $article = Article::create([
+                    'type' => ArticleType::News,
                     'feed_id' => $feed->id,
                     'article_uid' => $item['article_uid'],
                     'original_title' => $item['title'],
@@ -100,7 +110,7 @@ class CheckRssFeeds extends Command
                     $totalNew++;
                     $logger->log("Onay bekliyor: {$article->title}", 'info', $article);
 
-                    SendTelegramNewArticleJob::dispatch($article->fresh());
+                    SendTelegramNewArticleJob::dispatchSync($article->fresh());
                 } catch (\Throwable $e) {
                     $article->update([
                         'status' => ArticleStatus::Failed,

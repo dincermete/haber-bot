@@ -3,38 +3,18 @@
 namespace App\Jobs;
 
 use App\Models\Article;
-use App\Services\ActivityLogger;
-use App\Services\ImageGeneratorService;
-use Illuminate\Contracts\Queue\ShouldBeUnique;
-use Illuminate\Contracts\Queue\ShouldQueue;
+use App\Services\ArticleImageRegenerator;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
-class RegenerateArticleImageJob implements ShouldQueue, ShouldBeUnique
+class RegenerateArticleImageJob
 {
-    use InteractsWithQueue, Queueable, SerializesModels;
-
-    public int $tries = 2;
+    use Queueable, SerializesModels;
 
     public function __construct(public Article $article) {}
 
-    public function uniqueId(): string
+    public function handle(ArticleImageRegenerator $regenerator): void
     {
-        return 'regenerate-article-'.$this->article->id;
-    }
-
-    public function handle(ImageGeneratorService $imageGenerator, ActivityLogger $logger): void
-    {
-        $article = $this->article->fresh();
-
-        try {
-            $path = $imageGenerator->generate($article);
-            $article->update(['generated_image_path' => $path]);
-            $logger->log("Görsel yeniden üretildi: {$article->title}", 'info', $article);
-        } catch (\Throwable $e) {
-            $logger->log('Görsel üretilemedi: '.$e->getMessage(), 'error', $article);
-            throw $e;
-        }
+        $regenerator->regenerate($this->article);
     }
 }

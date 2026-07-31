@@ -5,16 +5,12 @@ namespace App\Jobs;
 use App\Models\Article;
 use App\Services\ActivityLogger;
 use App\Services\TelegramService;
-use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
-use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 
-class SendTelegramNewArticleJob implements ShouldQueue
+class SendTelegramNewArticleJob
 {
-    use InteractsWithQueue, Queueable, SerializesModels;
-
-    public int $tries = 3;
+    use Queueable, SerializesModels;
 
     public function __construct(public Article $article) {}
 
